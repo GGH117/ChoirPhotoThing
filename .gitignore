@@ -1,0 +1,24 @@
+# Maven
+target/
+*.class
+*.jar
+
+# Database (local only — don't commit real data)
+*.db
+*.sqlite
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.classpath
+*.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Google OAuth tokens (sensitive!)
+tokens/
+credentials.json

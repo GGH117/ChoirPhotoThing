@@ -1,0 +1,65 @@
+/* ============================================================
+   Choir Manager — Main Stylesheet
+   ============================================================ */
+
+.root {
+    -fx-font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    -fx-font-size: 13px;
+    -fx-background-color: #f5f5f5;
+}
+
+/* Tab pane */
+.tab-pane .tab-header-area .tab {
+    -fx-padding: 8 16 8 16;
+}
+
+.tab-pane .tab:selected {
+    -fx-background-color: #2c6fad;
+}
+
+.tab-pane .tab:selected .tab-label {
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+}
+
+/* Buttons */
+.button {
+    -fx-background-color: #2c6fad;
+    -fx-text-fill: white;
+    -fx-background-radius: 4;
+    -fx-padding: 6 14 6 14;
+    -fx-cursor: hand;
+}
+
+.button:hover {
+    -fx-background-color: #1a4f80;
+}
+
+/* Table */
+.table-view {
+    -fx-background-color: white;
+    -fx-border-color: #ddd;
+}
+
+.table-view .column-header {
+    -fx-background-color: #e8edf2;
+    -fx-font-weight: bold;
+}
+
+.table-row-cell:selected {
+    -fx-background-color: #cde0f5;
+    -fx-text-fill: black;
+}
+
+/* Form fields */
+.text-field, .text-area, .combo-box, .date-picker {
+    -fx-background-color: white;
+    -fx-border-color: #bbb;
+    -fx-border-radius: 3;
+    -fx-background-radius: 3;
+    -fx-padding: 4 6 4 6;
+}
+
+.text-field:focused, .text-area:focused {
+    -fx-border-color: #2c6fad;
+}
