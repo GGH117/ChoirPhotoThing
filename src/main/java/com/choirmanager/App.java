@@ -1,6 +1,8 @@
 package com.choirmanager;
 
 import com.choirmanager.db.DatabaseManager;
+import com.choirmanager.ui.attendance.AttendanceView;
+import com.choirmanager.ui.photos.PhotoView;
 import com.choirmanager.ui.roster.RosterView;
 import javafx.application.Application;
 import javafx.scene.Scene;
@@ -12,7 +14,6 @@ import javafx.stage.Stage;
 
 /**
  * Main entry point for Choir Manager.
- * Renders a tabbed layout with one tab per module.
  */
 public class App extends Application {
 
@@ -21,15 +22,11 @@ public class App extends Application {
         TabPane tabPane = new TabPane();
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
-        // Roster tab (fully implemented)
-        Tab rosterTab = new Tab("👥 Roster", new RosterView());
+        Tab rosterTab     = new Tab("👥 Roster",    new RosterView());
+        Tab attendanceTab = new Tab("✅ Attendance", new AttendanceView());
+        Tab photosTab     = new Tab("📷 Photos",     new PhotoView());
 
-        // Placeholder tabs (to be built in future sprints)
-        Tab attendanceTab = new Tab("✅ Attendance", placeholder("Attendance module coming soon"));
-        Tab scheduleTab   = new Tab("📅 Schedule",   placeholder("Schedule module coming soon"));
-        Tab photosTab     = new Tab("📷 Photos",     placeholder("Photo module coming soon"));
-
-        tabPane.getTabs().addAll(rosterTab, attendanceTab, scheduleTab, photosTab);
+        tabPane.getTabs().addAll(rosterTab, attendanceTab, photosTab);
 
         BorderPane root = new BorderPane(tabPane);
         Scene scene = new Scene(root, 1100, 700);
@@ -46,8 +43,7 @@ public class App extends Application {
     private BorderPane placeholder(String text) {
         Label lbl = new Label(text);
         lbl.setStyle("-fx-font-size: 16px; -fx-text-fill: #888;");
-        BorderPane pane = new BorderPane(lbl);
-        return pane;
+        return new BorderPane(lbl);
     }
 
     public static void main(String[] args) {
