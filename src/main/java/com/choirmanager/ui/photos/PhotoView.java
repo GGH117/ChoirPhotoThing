@@ -1,9 +1,11 @@
 package com.choirmanager.ui.photos;
 
+import com.choirmanager.db.EventDAO;
 import com.choirmanager.db.MemberDAO;
 import com.choirmanager.db.PhotoDAO;
 import com.choirmanager.model.Member;
 import com.choirmanager.model.Photo;
+import com.choirmanager.service.DriveAutoSortService;
 import com.choirmanager.service.FaceRecognitionService;
 import com.choirmanager.service.GoogleDriveService;
 import com.google.api.services.drive.model.File;
@@ -27,48 +29,62 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Polished photo gallery with:
- *  - Folder-grouped sections with header labels
- *  - Sort by date / folder / tag count
- *  - "Untagged only" filter toggle
- *  - Multi-select bulk tagging
- *  - Auto-rename by event
- *  - Search by member name or folder
+ * Photo gallery tab.
+ *
+ * Toolbar includes:
+ *  - Connect Google Drive
+ *  - ✨ Auto-Sort (new) — scans all Drive folders and sorts automatically
+ *  - Sync Folder (manual single-folder sync, still available)
+ *  - Bulk Tag / Auto-Rename / Export Member
+ *
+ * Gallery renders photos grouped by event folder with search, sort, and
+ * untagged filter.
  */
 public class PhotoView extends BorderPane {
 
-    private final PhotoDAO photoDAO;
-    private final MemberDAO memberDAO;
-    private final GoogleDriveService driveService;
+    private final PhotoDAO   photoDAO;
+    private final MemberDAO  memberDAO;
+    private final EventDAO   eventDAO;
+    private final GoogleDriveService     driveService;
     private final FaceRecognitionService faceService;
+    private DriveAutoSortService         autoSortService; // created after Drive connects
 
+    // Toolbar controls
     private final Button connectBtn    = new Button("🔗 Connect Google Drive");
+    private final Button autoSortBtn   = new Button("✨ Auto-Sort All");
     private final Button syncBtn       = new Button("🔄 Sync Folder");
     private final Button bulkTagBtn    = new Button("🏷 Bulk Tag Selected");
     private final Button renameBtn     = new Button("✏️ Auto-Rename");
     private final Button exportBtn     = new Button("📤 Export Member");
-    private final TextField searchField = new TextField();
+
+    private final TextField    searchField    = new TextField();
     private final ComboBox<String> sortCombo  = new ComboBox<>();
     private final ToggleButton untaggedToggle = new ToggleButton("⬜ Untagged Only");
 
-    private final TreeView<String> folderTree    = new TreeView<>();
-    private final VBox galleryContainer          = new VBox(0);
-    private final Label statusLabel              = new Label("Not connected to Google Drive");
+    private final TreeView<String> folderTree   = new TreeView<>();
+    private final VBox galleryContainer         = new VBox(0);
+    private final Label statusLabel             = new Label("Not connected to Google Drive");
 
     private List<Member> allMembers = new ArrayList<>();
     private String selectedDriveFolderId = null;
-    private final List<Photo> allPhotos              = new ArrayList<>();
-    private final Map<Integer, List<Member>> tagCache = new HashMap<>();
-    private final Set<Integer> selectedPhotoIds       = new HashSet<>();
+    private final List<Photo>              allPhotos    = new ArrayList<>();
+    private final Map<Integer, List<Member>> tagCache   = new HashMap<>();
+    private final Set<Integer> selectedPhotoIds         = new HashSet<>();
+
+    // =========================================================================
+    // Constructor
+    // =========================================================================
 
     public PhotoView() throws SQLException {
         this.photoDAO     = new PhotoDAO();
         this.memberDAO    = new MemberDAO();
+        this.eventDAO     = new EventDAO();
         this.driveService = new GoogleDriveService();
         this.faceService  = new FaceRecognitionService(photoDAO);
         buildUI();
         loadMembersAsync();
         loadAIModelAsync();
+        loadLocalPhotos();   // populate from DB on open (no Drive needed)
     }
 
     // =========================================================================
@@ -76,18 +92,23 @@ public class PhotoView extends BorderPane {
     // =========================================================================
 
     private void buildUI() {
+        autoSortBtn.setDisable(true);
         syncBtn.setDisable(true);
         bulkTagBtn.setDisable(true);
 
-        // Toolbar row 1
-        HBox toolbar1 = new HBox(8, connectBtn, syncBtn,
+        styleAutoSortBtn(false); // normal state
+
+        // ── Toolbar row 1 ─────────────────────────────────────────────────
+        HBox toolbar1 = new HBox(8,
+                connectBtn, autoSortBtn, new Separator(javafx.geometry.Orientation.VERTICAL),
+                syncBtn,
                 new Separator(javafx.geometry.Orientation.VERTICAL),
                 bulkTagBtn, renameBtn, new Region(), exportBtn);
-        HBox.setHgrow(toolbar1.getChildren().get(6), Priority.ALWAYS);
+        HBox.setHgrow(toolbar1.getChildren().get(7), Priority.ALWAYS);
         toolbar1.setPadding(new Insets(8, 12, 4, 12));
         toolbar1.setAlignment(Pos.CENTER_LEFT);
 
-        // Toolbar row 2
+        // ── Toolbar row 2 ─────────────────────────────────────────────────
         searchField.setPromptText("🔍 Search by member or folder…");
         searchField.setPrefWidth(240);
         searchField.textProperty().addListener((o, old, v) -> applyFiltersAndRebuild());
@@ -111,7 +132,7 @@ public class PhotoView extends BorderPane {
         toolbarBox.setStyle("-fx-background-color: #f5f5f5; " +
                 "-fx-border-color: #ddd; -fx-border-width: 0 0 1 0;");
 
-        // Folder tree
+        // ── Folder tree ───────────────────────────────────────────────────
         TreeItem<String> treeRoot = new TreeItem<>("My Drive");
         treeRoot.setExpanded(true);
         folderTree.setRoot(treeRoot);
@@ -125,11 +146,11 @@ public class PhotoView extends BorderPane {
         VBox leftPanel = new VBox(folderLabel, folderTree);
         VBox.setVgrow(folderTree, Priority.ALWAYS);
 
-        // Gallery
+        // ── Gallery ───────────────────────────────────────────────────────
         galleryContainer.setPadding(new Insets(12));
         galleryContainer.setStyle("-fx-background-color: white;");
         Label placeholder = new Label(
-                "Connect to Google Drive and select an event folder to view photos.");
+                "Connect to Google Drive and click ✨ Auto-Sort All to get started.");
         placeholder.setStyle("-fx-text-fill: #999; -fx-font-size: 14px;");
         galleryContainer.getChildren().add(placeholder);
 
@@ -137,20 +158,186 @@ public class PhotoView extends BorderPane {
         scroll.setFitToWidth(true);
         scroll.setStyle("-fx-background-color: white;");
 
+        // ── Status bar ────────────────────────────────────────────────────
         HBox statusBar = new HBox(statusLabel);
         statusBar.setPadding(new Insets(4, 12, 4, 12));
         statusBar.setStyle("-fx-background-color: #e8e8e8;");
 
+        // ── Wire buttons ──────────────────────────────────────────────────
         connectBtn.setOnAction(e -> connectToDrive());
-        syncBtn.setOnAction(e    -> syncSelectedFolder());
-        bulkTagBtn.setOnAction(e -> bulkTagSelected());
-        renameBtn.setOnAction(e  -> autoRenamePhotos());
-        exportBtn.setOnAction(e  -> exportMemberPhotos());
+        autoSortBtn.setOnAction(e -> openAutoSortDialog());
+        syncBtn.setOnAction(e     -> syncSelectedFolder());
+        bulkTagBtn.setOnAction(e  -> bulkTagSelected());
+        renameBtn.setOnAction(e   -> autoRenamePhotos());
+        exportBtn.setOnAction(e   -> exportMemberPhotos());
 
         setTop(toolbarBox);
         setLeft(leftPanel);
         setCenter(scroll);
         setBottom(statusBar);
+    }
+
+    // =========================================================================
+    // Auto-Sort
+    // =========================================================================
+
+    private void openAutoSortDialog() {
+        AutoSortDialog dialog = new AutoSortDialog(autoSortService);
+        dialog.initOwner(getScene().getWindow());
+        dialog.initModality(Modality.APPLICATION_MODAL);
+
+        Optional<DriveAutoSortService.SortSummary> result = dialog.showAndWait();
+        result.ifPresent(summary -> {
+            setStatus("Auto-sort complete — " + summary.summary());
+            // Reload gallery from DB (includes newly inserted photos)
+            allPhotos.clear();
+            tagCache.clear();
+            loadLocalPhotos();
+        });
+    }
+
+    /** Style the Auto-Sort button differently when connected vs not. */
+    private void styleAutoSortBtn(boolean connected) {
+        if (connected) {
+            autoSortBtn.setStyle(
+                "-fx-background-color: #1a7a3a; -fx-text-fill: white; " +
+                "-fx-background-radius: 4; -fx-font-weight: bold; -fx-cursor: hand;");
+        } else {
+            autoSortBtn.setStyle(""); // revert to CSS default
+        }
+    }
+
+    // =========================================================================
+    // Google Drive — connect + folder sync
+    // =========================================================================
+
+    private void connectToDrive() {
+        connectBtn.setDisable(true);
+        connectBtn.setText("Connecting…");
+        setStatus("Connecting to Google Drive…");
+
+        new Thread(() -> {
+            try {
+                driveService.connect();
+                autoSortService = new DriveAutoSortService(driveService, eventDAO, photoDAO);
+                List<File> folders = driveService.listEventFolders(null);
+
+                Platform.runLater(() -> {
+                    populateFolderTree(folders);
+                    connectBtn.setText("✅ Connected");
+                    autoSortBtn.setDisable(false);
+                    syncBtn.setDisable(false);
+                    styleAutoSortBtn(true);
+                    setStatus("Connected — " + folders.size() +
+                              " folder(s) found. Click ✨ Auto-Sort All to import everything.");
+                });
+            } catch (IOException | GeneralSecurityException e) {
+                Platform.runLater(() -> {
+                    connectBtn.setDisable(false);
+                    connectBtn.setText("🔗 Connect Google Drive");
+                    setStatus("Connection failed.");
+                    new Alert(Alert.AlertType.ERROR,
+                            "Could not connect to Google Drive.\n\n" +
+                            "Make sure credentials.json is in the project root.\n\n" +
+                            e.getMessage(), ButtonType.OK).showAndWait();
+                });
+            }
+        }).start();
+    }
+
+    private void populateFolderTree(List<File> folders) {
+        TreeItem<String> root = folderTree.getRoot();
+        root.getChildren().clear();
+        for (File f : folders) {
+            TreeItem<String> item = new TreeItem<>(f.getName());
+            item.getProperties().put("driveId", f.getId());
+            root.getChildren().add(item);
+        }
+    }
+
+    private void onFolderSelected(TreeItem<String> item) {
+        if (item == null || item == folderTree.getRoot()) return;
+        Object id = item.getProperties().get("driveId");
+        if (id instanceof String folderId) {
+            selectedDriveFolderId = folderId;
+            setStatus("Selected: " + item.getValue() + " — click 🔄 Sync Folder to load manually");
+        }
+    }
+
+    /** Manual single-folder sync (unchanged behaviour from original). */
+    private void syncSelectedFolder() {
+        if (selectedDriveFolderId == null) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "Select a folder from the left panel first.", ButtonType.OK).showAndWait();
+            return;
+        }
+        String folderName = folderTree.getSelectionModel().getSelectedItem().getValue();
+        syncBtn.setDisable(true);
+        setStatus("Syncing " + folderName + "…");
+
+        new Thread(() -> {
+            try {
+                List<File> drivePhotos = driveService.listPhotosInFolder(selectedDriveFolderId);
+                setStatusLater("Found " + drivePhotos.size() + " photos — downloading…");
+
+                for (int i = 0; i < drivePhotos.size(); i++) {
+                    File f = drivePhotos.get(i);
+                    Path thumb = driveService.downloadThumbnail(f);
+                    Photo existing = photoDAO.findByFilePath(thumb.toString());
+                    Photo photo;
+                    if (existing != null) {
+                        photo = existing;
+                    } else {
+                        photo = new Photo(0, thumb.toString(), f.getId(), folderName,
+                                null, DriveAutoSortService.inferDate(f.getName()), null);
+                        photoDAO.insertPhoto(photo);
+                    }
+                    photo.setDriveFolderName(folderName);
+                    tagCache.put(photo.getId(), photoDAO.getTaggedMembers(photo.getId()));
+                    if (!allPhotos.contains(photo)) allPhotos.add(photo);
+                    final int idx = i + 1;
+                    setStatusLater("Loaded " + idx + "/" + drivePhotos.size() + "…");
+                }
+                Platform.runLater(() -> {
+                    syncBtn.setDisable(false);
+                    setStatus(folderName + " — " + drivePhotos.size() + " photo(s) loaded.");
+                    applyFiltersAndRebuild();
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    syncBtn.setDisable(false);
+                    setStatus("Sync failed: " + e.getMessage());
+                    new Alert(Alert.AlertType.ERROR, "Sync failed: " + e.getMessage(),
+                            ButtonType.OK).showAndWait();
+                });
+            }
+        }).start();
+    }
+
+    // =========================================================================
+    // Load photos from local DB (no Drive connection needed)
+    // =========================================================================
+
+    private void loadLocalPhotos() {
+        new Thread(() -> {
+            try {
+                List<Photo> photos = photoDAO.findAll();
+                for (Photo p : photos) {
+                    tagCache.put(p.getId(), photoDAO.getTaggedMembers(p.getId()));
+                }
+                Platform.runLater(() -> {
+                    allPhotos.clear();
+                    allPhotos.addAll(photos);
+                    if (!photos.isEmpty()) {
+                        applyFiltersAndRebuild();
+                        setStatus(photos.size() + " photo(s) loaded from library.");
+                    }
+                });
+            } catch (Exception e) {
+                Platform.runLater(() ->
+                        setStatus("Could not load local library: " + e.getMessage()));
+            }
+        }).start();
     }
 
     // =========================================================================
@@ -163,7 +350,8 @@ public class PhotoView extends BorderPane {
         String sort          = sortCombo.getValue();
 
         List<Photo> filtered = allPhotos.stream().filter(p -> {
-            if (untaggedOnly && !tagCache.getOrDefault(p.getId(), List.of()).isEmpty()) return false;
+            if (untaggedOnly && !tagCache.getOrDefault(p.getId(), List.of()).isEmpty())
+                return false;
             if (!query.isBlank()) {
                 String folder = p.getDriveFolderName() != null
                         ? p.getDriveFolderName().toLowerCase() : "";
@@ -183,6 +371,7 @@ public class PhotoView extends BorderPane {
         };
         filtered.sort(comparator);
 
+        // Group by folder name
         LinkedHashMap<String, List<Photo>> grouped = new LinkedHashMap<>();
         for (Photo p : filtered) {
             String folder = p.getDriveFolderName() != null ? p.getDriveFolderName() : "Unsorted";
@@ -194,7 +383,9 @@ public class PhotoView extends BorderPane {
             if (grouped.isEmpty()) {
                 Label empty = new Label(untaggedOnly
                         ? "🎉 All photos are tagged!"
-                        : "No photos match your search.");
+                        : allPhotos.isEmpty()
+                            ? "Connect to Drive and click ✨ Auto-Sort All to import photos."
+                            : "No photos match your search.");
                 empty.setStyle("-fx-text-fill: #999; -fx-font-size: 14px; -fx-padding: 20;");
                 galleryContainer.getChildren().add(empty);
                 return;
@@ -215,10 +406,9 @@ public class PhotoView extends BorderPane {
         Label countLbl = new Label(count + " photo" + (count == 1 ? "" : "s"));
         countLbl.setStyle("-fx-text-fill: #888; -fx-font-size: 12px;");
 
-        Hyperlink selectAll = new Hyperlink("Select all");
-        selectAll.setOnAction(e -> selectAllInFolder(folderName));
-
+        Hyperlink selectAll  = new Hyperlink("Select all");
         Hyperlink deselectAll = new Hyperlink("Deselect");
+        selectAll.setOnAction(e  -> selectAllInFolder(folderName));
         deselectAll.setOnAction(e -> deselectAllInFolder(folderName));
 
         Region spacer = new Region();
@@ -255,20 +445,18 @@ public class PhotoView extends BorderPane {
             } catch (Exception ignored) {}
         }
 
-        // Tagged members badge
         List<Member> tags = tagCache.getOrDefault(photo.getId(), List.of());
+
         Label tagBadge = new Label(tags.isEmpty() ? "" : tags.size() + " 👤");
         tagBadge.setStyle("-fx-background-color: #2c6fad; -fx-text-fill: white; " +
                 "-fx-background-radius: 8; -fx-padding: 1 6 1 6; -fx-font-size: 10px;");
         tagBadge.setVisible(!tags.isEmpty());
 
-        // Untagged badge
         Label untaggedBadge = new Label("UNTAGGED");
         untaggedBadge.setStyle("-fx-background-color: #e8a020; -fx-text-fill: white; " +
                 "-fx-background-radius: 4; -fx-padding: 1 5 1 5; -fx-font-size: 9px;");
         untaggedBadge.setVisible(tags.isEmpty());
 
-        // Selection checkbox
         CheckBox selectBox = new CheckBox();
         selectBox.setSelected(selectedPhotoIds.contains(photo.getId()));
         selectBox.selectedProperty().addListener((o, old, checked) -> {
@@ -298,20 +486,15 @@ public class PhotoView extends BorderPane {
         VBox tile = new VBox(4, thumbStack, nameLbl, tagNames);
         tile.setAlignment(Pos.CENTER);
         tile.setPadding(new Insets(6));
-        boolean selected = selectedPhotoIds.contains(photo.getId());
-        tile.setStyle(tileStyle(selected));
-        tile.getProperties().put("photo", photo);
+        tile.setStyle(tileStyle(selectedPhotoIds.contains(photo.getId())));
 
-        // Double-click opens detail; single click toggles selection
         tile.setOnMouseClicked(e -> {
-            if (e.getClickCount() == 2) {
-                openPhotoDetail(photo);
-            } else {
+            if (e.getClickCount() == 2) openPhotoDetail(photo);
+            else {
                 selectBox.setSelected(!selectBox.isSelected());
                 tile.setStyle(tileStyle(selectBox.isSelected()));
             }
         });
-        // Keep border in sync with checkbox
         selectBox.selectedProperty().addListener((o, old, v) -> tile.setStyle(tileStyle(v)));
 
         return tile;
@@ -330,107 +513,6 @@ public class PhotoView extends BorderPane {
     }
 
     // =========================================================================
-    // Google Drive
-    // =========================================================================
-
-    private void connectToDrive() {
-        connectBtn.setDisable(true);
-        connectBtn.setText("Connecting…");
-        setStatus("Connecting to Google Drive…");
-        new Thread(() -> {
-            try {
-                driveService.connect();
-                List<File> folders = driveService.listEventFolders(null);
-                Platform.runLater(() -> {
-                    populateFolderTree(folders);
-                    connectBtn.setText("✅ Connected");
-                    syncBtn.setDisable(false);
-                    setStatus("Connected — " + folders.size() + " folder(s) in My Drive");
-                });
-            } catch (IOException | GeneralSecurityException e) {
-                Platform.runLater(() -> {
-                    connectBtn.setDisable(false);
-                    connectBtn.setText("🔗 Connect Google Drive");
-                    setStatus("Connection failed.");
-                    new Alert(Alert.AlertType.ERROR,
-                            "Could not connect to Google Drive.\n\nMake sure credentials.json " +
-                            "is in the project root.\n\n" + e.getMessage(),
-                            ButtonType.OK).showAndWait();
-                });
-            }
-        }).start();
-    }
-
-    private void populateFolderTree(List<File> folders) {
-        TreeItem<String> root = folderTree.getRoot();
-        root.getChildren().clear();
-        for (File f : folders) {
-            TreeItem<String> item = new TreeItem<>(f.getName());
-            item.getProperties().put("driveId", f.getId());
-            root.getChildren().add(item);
-        }
-    }
-
-    private void onFolderSelected(TreeItem<String> item) {
-        if (item == null || item == folderTree.getRoot()) return;
-        Object id = item.getProperties().get("driveId");
-        if (id instanceof String folderId) {
-            selectedDriveFolderId = folderId;
-            setStatus("Selected: " + item.getValue() + " — click Sync to load photos");
-        }
-    }
-
-    private void syncSelectedFolder() {
-        if (selectedDriveFolderId == null) {
-            new Alert(Alert.AlertType.INFORMATION,
-                    "Select an event folder from the left panel first.",
-                    ButtonType.OK).showAndWait();
-            return;
-        }
-        String folderName = folderTree.getSelectionModel().getSelectedItem().getValue();
-        syncBtn.setDisable(true);
-        setStatus("Syncing " + folderName + "…");
-
-        new Thread(() -> {
-            try {
-                List<File> drivePhotos = driveService.listPhotosInFolder(selectedDriveFolderId);
-                setStatusLater("Found " + drivePhotos.size() + " photos — downloading thumbnails…");
-
-                for (int i = 0; i < drivePhotos.size(); i++) {
-                    File f = drivePhotos.get(i);
-                    Path thumb = driveService.downloadThumbnail(f);
-                    Photo existing = photoDAO.findByFilePath(thumb.toString());
-                    Photo photo;
-                    if (existing != null) {
-                        photo = existing;
-                    } else {
-                        photo = new Photo(0, thumb.toString(), f.getId(), folderName,
-                                null, extractDate(f.getName()), null);
-                        photoDAO.insertPhoto(photo);
-                    }
-                    photo.setDriveFolderName(folderName);
-                    tagCache.put(photo.getId(), photoDAO.getTaggedMembers(photo.getId()));
-                    allPhotos.add(photo);
-                    final int idx = i + 1;
-                    setStatusLater("Loaded " + idx + "/" + drivePhotos.size() + "…");
-                }
-                Platform.runLater(() -> {
-                    syncBtn.setDisable(false);
-                    setStatus(folderName + " — " + drivePhotos.size() + " photos loaded");
-                    applyFiltersAndRebuild();
-                });
-            } catch (Exception e) {
-                Platform.runLater(() -> {
-                    syncBtn.setDisable(false);
-                    setStatus("Sync failed: " + e.getMessage());
-                    new Alert(Alert.AlertType.ERROR, "Sync failed: " + e.getMessage(),
-                            ButtonType.OK).showAndWait();
-                });
-            }
-        }).start();
-    }
-
-    // =========================================================================
     // Bulk tag
     // =========================================================================
 
@@ -445,8 +527,8 @@ public class PhotoView extends BorderPane {
             try {
                 for (int photoId : selectedPhotoIds) {
                     photoDAO.tagMember(photoId, member.getId());
-                    List<Member> tags = tagCache.computeIfAbsent(photoId, k -> new ArrayList<>());
-                    if (tags.stream().noneMatch(m -> m.getId() == member.getId())) tags.add(member);
+                    List<Member> t = tagCache.computeIfAbsent(photoId, k -> new ArrayList<>());
+                    if (t.stream().noneMatch(m -> m.getId() == member.getId())) t.add(member);
                 }
                 Platform.runLater(() -> {
                     selectedPhotoIds.clear();
@@ -467,7 +549,7 @@ public class PhotoView extends BorderPane {
     private void autoRenamePhotos() {
         if (allPhotos.isEmpty()) {
             new Alert(Alert.AlertType.INFORMATION,
-                    "Sync a folder first before renaming.", ButtonType.OK).showAndWait();
+                    "Import photos first.", ButtonType.OK).showAndWait();
             return;
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
@@ -486,11 +568,11 @@ public class PhotoView extends BorderPane {
                 if (!Files.exists(src)) continue;
                 String folder = photo.getDriveFolderName() != null
                         ? photo.getDriveFolderName() : "Unsorted";
-                String safeFolder = folder.replaceAll("[^a-zA-Z0-9 _-]", "").replace(" ", "_");
+                String safe = folder.replaceAll("[^a-zA-Z0-9 _-]", "").replace(" ", "_");
                 int idx = counters.merge(folder, 1, Integer::sum);
                 String ext = getExtension(src.getFileName().toString());
                 Path dest = src.getParent().resolve(
-                        String.format("%s_%03d%s", safeFolder, idx, ext));
+                        String.format("%s_%03d%s", safe, idx, ext));
                 try {
                     if (!Files.exists(dest)) {
                         Files.move(src, dest);
@@ -516,7 +598,7 @@ public class PhotoView extends BorderPane {
     private void openPhotoDetail(Photo photo) {
         if (photo.getFilePath() == null || !Files.exists(Path.of(photo.getFilePath()))) {
             new Alert(Alert.AlertType.WARNING,
-                    "Photo file not found on disk. Try syncing again.",
+                    "Photo file not found on disk. Try re-syncing.",
                     ButtonType.OK).showAndWait();
             return;
         }
@@ -535,15 +617,16 @@ public class PhotoView extends BorderPane {
                 }).start());
 
         Scene scene = new Scene(detail, 980, 620);
-        try { scene.getStylesheets().add(
-                getClass().getResource("/css/main.css").toExternalForm()); }
-        catch (Exception ignored) {}
+        try {
+            scene.getStylesheets().add(
+                    getClass().getResource("/css/main.css").toExternalForm());
+        } catch (Exception ignored) {}
         stage.setScene(scene);
         stage.show();
     }
 
     // =========================================================================
-    // Export
+    // Export member photos
     // =========================================================================
 
     private void exportMemberPhotos() {
@@ -615,10 +698,12 @@ public class PhotoView extends BorderPane {
         new Thread(() -> {
             try {
                 faceService.load();
-                Platform.runLater(() -> setStatus("AI ready — connect Google Drive to get started"));
-            } catch (Exception e) {
                 Platform.runLater(() -> setStatus(
-                        "AI model unavailable — manual tagging still works"));
+                        allPhotos.isEmpty()
+                        ? "AI ready — connect Google Drive to get started"
+                        : "AI ready"));
+            } catch (Exception e) {
+                Platform.runLater(() -> setStatus("AI model unavailable — manual tagging still works"));
             }
         }).start();
     }
@@ -630,12 +715,6 @@ public class PhotoView extends BorderPane {
     private void setStatus(String msg) { statusLabel.setText(msg); }
     private void setStatusLater(String msg) { Platform.runLater(() -> setStatus(msg)); }
     private String nullSafe(String s) { return s != null ? s : ""; }
-
-    private String extractDate(String filename) {
-        java.util.regex.Matcher m =
-                java.util.regex.Pattern.compile("(\\d{4}-\\d{2}-\\d{2})").matcher(filename);
-        return m.find() ? m.group(1) : null;
-    }
 
     private String getExtension(String filename) {
         int dot = filename.lastIndexOf('.');

@@ -3,7 +3,7 @@ target/
 *.class
 *.jar
 
-# Database (local only — don't commit real data)
+# Database (local only)
 *.db
 *.sqlite
 
@@ -22,3 +22,6 @@ Thumbs.db
 # Google OAuth tokens (sensitive!)
 tokens/
 credentials.json
+
+# Photo cache (local, not committed)
+photo_cache/

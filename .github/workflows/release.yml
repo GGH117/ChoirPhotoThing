@@ -1,0 +1,162 @@
+name: Build & Release
+
+# Triggers:
+#   - Push a tag like v1.1.0  →  builds JAR + creates GitHub release
+#   - Push to main            →  CI build only (no release)
+#   - Pull request to main    →  CI build only
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # ===========================================================================
+  # Job 1: Build (runs on every push/PR)
+  # ===========================================================================
+  build:
+    name: Build fat JAR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      # JavaFX on Linux headless runners needs Xvfb for the build plugin,
+      # but the shade plugin (which makes the JAR) doesn't need a display.
+      - name: Build fat JAR
+        run: mvn --batch-mode package -DskipTests
+
+      # Extract version from pom.xml for use in later steps
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Upload JAR as a build artifact (available for 90 days on every build)
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: choir-manager-jar
+          path: target/choir-manager-${{ steps.version.outputs.value }}.jar
+          retention-days: 90
+
+  # ===========================================================================
+  # Job 2: Release (only when a version tag is pushed)
+  # ===========================================================================
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # needed to create releases and upload assets
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Re-build (cache will make this fast) to get a clean JAR in this job
+      - name: Build fat JAR
+        run: mvn --batch-mode package -DskipTests
+
+      # ── Launcher scripts ───────────────────────────────────────────────────
+      - name: Create launcher scripts
+        run: |
+          JAR="choir-manager-${{ steps.version.outputs.value }}.jar"
+
+          # Unix launcher
+          cat > run.sh << SHELL
+          #!/usr/bin/env bash
+          # Choir Manager launcher — Java 21 required
+          DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+          java \\
+            --add-opens javafx.graphics/com.sun.javafx.application=ALL-UNNAMED \\
+            --add-opens javafx.controls/com.sun.javafx.scene.control=ALL-UNNAMED \\
+            -jar "\$DIR/$JAR" "\$@"
+          SHELL
+          chmod +x run.sh
+
+          # Windows launcher
+          cat > run.bat << BAT
+          @echo off
+          REM Choir Manager launcher — Java 21 required
+          set DIR=%~dp0
+          java ^
+            --add-opens javafx.graphics/com.sun.javafx.application=ALL-UNNAMED ^
+            --add-opens javafx.controls/com.sun.javafx.scene.control=ALL-UNNAMED ^
+            -jar "%DIR%$JAR" %*
+          BAT
+
+      # ── Extract release notes from CHANGELOG ──────────────────────────────
+      - name: Extract release notes
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          # Pull the section for this version out of CHANGELOG.md
+          python3 - "$VERSION" CHANGELOG.md << 'PYEOF'
+          import sys, re
+
+          version = sys.argv[1]
+          changelog = open(sys.argv[2]).read()
+
+          # Match the block starting at "## [X.Y.Z]" up to the next "## ["
+          pattern = rf'(## \[{re.escape(version)}\].*?)(?=\n## \[|\Z)'
+          match = re.search(pattern, changelog, re.DOTALL)
+          notes = match.group(1).strip() if match else f"Release {version}"
+
+          with open("release_notes.md", "w") as f:
+              f.write(notes)
+          PYEOF
+          echo "Release notes extracted."
+
+      # ── Build release zip (JAR + launchers + readme) ─────────────────────
+      - name: Package release zip
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          DIST="choir-manager-$VERSION"
+          mkdir "$DIST"
+          cp "target/$DIST.jar" "$DIST/"
+          cp run.sh run.bat README.md CHANGELOG.md "$DIST/"
+          # Placeholder for credentials — remind users to drop theirs in
+          echo "Place your Google OAuth credentials.json here." > "$DIST/credentials.json.PLACEHOLDER"
+          zip -r "$DIST.zip" "$DIST/"
+          echo "ZIP: $DIST.zip"
+
+      # ── Create GitHub Release ─────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Choir Manager v${{ steps.version.outputs.value }}"
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.value, '-') }}
+          files: |
+            target/choir-manager-${{ steps.version.outputs.value }}.jar
+            choir-manager-${{ steps.version.outputs.value }}.zip
