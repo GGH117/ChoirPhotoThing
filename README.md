@@ -1,6 +1,5 @@
 # Choir Manager
 
-[![Build & Release](https://github.com/YOUR_USERNAME/ChoirManager/actions/workflows/release.yml/badge.svg)](https://github.com/YOUR_USERNAME/ChoirManager/actions/workflows/release.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![Java](https://img.shields.io/badge/Java-21-orange)
 ![JavaFX](https://img.shields.io/badge/JavaFX-21.0.2-green)
@@ -33,7 +32,7 @@ mvn javafx:run
 
 ## Download a Release
 
-Head to the [Releases page](https://github.com/YOUR_USERNAME/ChoirManager/releases) and
+Head to the [Releases page](https://github.com/Hextral/ChoirManager/releases) and
 download the latest `choir-manager-X.Y.Z.jar`.
 
 ```bash
