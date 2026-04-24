@@ -32,7 +32,7 @@ mvn javafx:run
 
 ## Download a Release
 
-Head to the [Releases page](https://github.com/Hextral/ChoirManager/releases) and
+Head to the [Releases page](https://github.com/GGH117/ChoirManager/releases) and
 download the latest `choir-manager-X.Y.Z.jar`.
 
 ```bash
