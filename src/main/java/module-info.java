@@ -3,9 +3,6 @@ module com.choirmanager {
     requires javafx.fxml;
     requires java.sql;
     requires org.xerial.sqlitejdbc;
-
-    // Google Drive API jars are non-modular — loaded via classpath, not requires.
-    // Access is granted via opens so reflection still works at runtime.
     requires java.net.http;
     requires com.google.api.client.auth;
     requires com.google.api.client.extensions.java6.auth;
