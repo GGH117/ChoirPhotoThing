@@ -7,7 +7,7 @@ All notable changes to Choir Manager are documented here.
 ## [1.1.0] — 2026-04-23
 
 ### Added
-- **Auto-Sort All** — scans every Google Drive folder at once, infers event
+- **✨ Auto-Sort All** — scans every Google Drive folder at once, infers event
   dates from folder names (ISO dates, "March 2024", underscores, bare years),
   fuzzy-matches photos to existing events within a ±3 day window, and
   auto-creates new events for unrecognised folders.

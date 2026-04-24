@@ -1,9 +1,7 @@
 name: Build & Release
 
-# Triggers:
-#   - Push a tag like v1.1.0  →  builds JAR + creates GitHub release
-#   - Push to main            →  CI build only (no release)
-#   - Pull request to main    →  CI build only
+# Push a version tag (e.g. v1.1.0)  →  full build + native installers + GitHub release
+# Push to main / open PR            →  CI build only (no release)
 on:
   push:
     tags:
@@ -14,149 +12,233 @@ on:
     branches:
       - main
 
+env:
+  MAIN_CLASS: "com.choirmanager.App"
+  APP_VENDOR: "ChoirManager"
+
 jobs:
-  # ===========================================================================
-  # Job 1: Build (runs on every push/PR)
-  # ===========================================================================
-  build:
+
+  # ============================================================================
+  # Job 1 — Build fat JAR on Ubuntu (fast, cached Maven)
+  # ============================================================================
+  build-jar:
     name: Build fat JAR
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Java 21
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
           cache: maven
 
-      # JavaFX on Linux headless runners needs Xvfb for the build plugin,
-      # but the shade plugin (which makes the JAR) doesn't need a display.
+      - name: Read project version
+        id: version
+        run: |
+          V=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+
       - name: Build fat JAR
         run: mvn --batch-mode package -DskipTests
 
-      # Extract version from pom.xml for use in later steps
-      - name: Read version
-        id: version
-        run: |
-          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
-
-      # Upload JAR as a build artifact (available for 90 days on every build)
-      - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: choir-manager-jar
+          name: fat-jar
           path: target/choir-manager-${{ steps.version.outputs.value }}.jar
-          retention-days: 90
+          retention-days: 7
 
-  # ===========================================================================
-  # Job 2: Release (only when a version tag is pushed)
-  # ===========================================================================
+  # ============================================================================
+  # Job 2 — Native installers (Windows .exe  +  macOS .dmg)
+  # Only runs when a version tag is pushed
+  # ============================================================================
+  package-native:
+    name: Package native installer (${{ matrix.platform }})
+    needs: build-jar
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            jpackage_type: exe
+
+          - platform: macos
+            os: macos-latest
+            jpackage_type: dmg
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Download fat JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: fat-jar
+          path: target/
+
+      # ── macOS: PNG → .icns ────────────────────────────────────────────────
+      - name: Build .icns icon (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          mkdir -p packaging/icons/icon.iconset
+          for size in 16 32 128 256 512; do
+            sips -z $size $size packaging/icons/icon.png \
+              --out packaging/icons/icon.iconset/icon_${size}x${size}.png
+            double=$((size * 2))
+            sips -z $double $double packaging/icons/icon.png \
+              --out packaging/icons/icon.iconset/icon_${size}x${size}@2x.png
+          done
+          iconutil -c icns packaging/icons/icon.iconset -o packaging/icons/icon.icns
+          echo "icon.icns built"
+
+      # ── Windows: install WiX 3 (jpackage needs it for .exe) ───────────────
+      - name: Install WiX toolset (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          choco install wixtoolset --version=3.14.1 -y --no-progress
+          echo "C:\Program Files (x86)\WiX Toolset v3.14\bin" | `
+            Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # ── jpackage — Windows ────────────────────────────────────────────────
+      - name: Run jpackage (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $V   = "${{ needs.build-jar.outputs.version }}"
+          $JAR = "choir-manager-${V}.jar"
+          mkdir dist
+
+          jpackage `
+            --type            exe `
+            --input           target `
+            --main-jar        $JAR `
+            --main-class      $env:MAIN_CLASS `
+            --name            "Choir Manager" `
+            --app-version     $V `
+            --vendor          $env:APP_VENDOR `
+            --description     "Desktop app for managing choir rosters, attendance and photos." `
+            --icon            packaging/icons/icon.ico `
+            --dest            dist `
+            --win-dir-chooser `
+            --win-menu        `
+            --win-shortcut    `
+            --java-options    "--add-opens=javafx.graphics/com.sun.javafx.application=ALL-UNNAMED" `
+            --java-options    "--add-opens=javafx.controls/com.sun.javafx.scene.control=ALL-UNNAMED"
+
+          # Rename to versioned filename
+          $built = Get-ChildItem dist\*.exe | Select-Object -First 1
+          $dest  = "dist\choir-manager-${V}-windows-setup.exe"
+          Rename-Item $built.FullName $dest
+          Write-Host "Packaged: $dest"
+
+      # ── jpackage — macOS ──────────────────────────────────────────────────
+      - name: Run jpackage (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          V="${{ needs.build-jar.outputs.version }}"
+          JAR="choir-manager-${V}.jar"
+          mkdir -p dist
+
+          jpackage \
+            --type            dmg \
+            --input           target \
+            --main-jar        "$JAR" \
+            --main-class      "$MAIN_CLASS" \
+            --name            "Choir Manager" \
+            --app-version     "$V" \
+            --vendor          "$APP_VENDOR" \
+            --description     "Desktop app for managing choir rosters, attendance and photos." \
+            --icon            packaging/icons/icon.icns \
+            --dest            dist \
+            --java-options    "--add-opens=javafx.graphics/com.sun.javafx.application=ALL-UNNAMED" \
+            --java-options    "--add-opens=javafx.controls/com.sun.javafx.scene.control=ALL-UNNAMED"
+
+          mv dist/*.dmg "dist/choir-manager-${V}-macos.dmg"
+          echo "Packaged: choir-manager-${V}-macos.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.platform }}
+          path: dist/choir-manager-*
+          retention-days: 7
+
+  # ============================================================================
+  # Job 3 — Create GitHub Release, attach all four assets
+  # ============================================================================
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build-jar, package-native]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-
     permissions:
-      contents: write   # needed to create releases and upload assets
+      contents: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Java 21
-        uses: actions/setup-java@v4
+      - name: Download fat JAR
+        uses: actions/download-artifact@v4
         with:
-          java-version: '21'
-          distribution: 'temurin'
-          cache: maven
+          name: fat-jar
+          path: dist/
 
-      - name: Read version
-        id: version
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-windows
+          path: dist/
+
+      - name: Download macOS installer
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-macos
+          path: dist/
+
+      - name: Build source zip
         run: |
-          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          V="${{ needs.build-jar.outputs.version }}"
+          zip -r "dist/choir-manager-${V}-source.zip" . \
+            --exclude ".git/*" --exclude "target/*" \
+            --exclude "photo_cache/*" --exclude "tokens/*" \
+            --exclude "*.db" --exclude "credentials.json"
 
-      # Re-build (cache will make this fast) to get a clean JAR in this job
-      - name: Build fat JAR
-        run: mvn --batch-mode package -DskipTests
-
-      # ── Launcher scripts ───────────────────────────────────────────────────
-      - name: Create launcher scripts
+      - name: Extract release notes from CHANGELOG
         run: |
-          JAR="choir-manager-${{ steps.version.outputs.value }}.jar"
-
-          # Unix launcher
-          cat > run.sh << SHELL
-          #!/usr/bin/env bash
-          # Choir Manager launcher — Java 21 required
-          DIR="\$(cd "\$(dirname "\$0")" && pwd)"
-          java \\
-            --add-opens javafx.graphics/com.sun.javafx.application=ALL-UNNAMED \\
-            --add-opens javafx.controls/com.sun.javafx.scene.control=ALL-UNNAMED \\
-            -jar "\$DIR/$JAR" "\$@"
-          SHELL
-          chmod +x run.sh
-
-          # Windows launcher
-          cat > run.bat << BAT
-          @echo off
-          REM Choir Manager launcher — Java 21 required
-          set DIR=%~dp0
-          java ^
-            --add-opens javafx.graphics/com.sun.javafx.application=ALL-UNNAMED ^
-            --add-opens javafx.controls/com.sun.javafx.scene.control=ALL-UNNAMED ^
-            -jar "%DIR%$JAR" %*
-          BAT
-
-      # ── Extract release notes from CHANGELOG ──────────────────────────────
-      - name: Extract release notes
-        id: notes
-        run: |
-          VERSION="${{ steps.version.outputs.value }}"
-          # Pull the section for this version out of CHANGELOG.md
-          python3 - "$VERSION" CHANGELOG.md << 'PYEOF'
+          V="${{ needs.build-jar.outputs.version }}"
+          python3 - "$V" CHANGELOG.md << 'PYEOF'
           import sys, re
-
-          version = sys.argv[1]
-          changelog = open(sys.argv[2]).read()
-
-          # Match the block starting at "## [X.Y.Z]" up to the next "## ["
-          pattern = rf'(## \[{re.escape(version)}\].*?)(?=\n## \[|\Z)'
-          match = re.search(pattern, changelog, re.DOTALL)
-          notes = match.group(1).strip() if match else f"Release {version}"
-
-          with open("release_notes.md", "w") as f:
-              f.write(notes)
+          version, path = sys.argv[1], sys.argv[2]
+          text = open(path).read()
+          m = re.search(rf'(## \[{re.escape(version)}\].*?)(?=\n## \[|\Z)', text, re.DOTALL)
+          open("release_notes.md", "w").write(m.group(1).strip() if m else f"Release {version}")
           PYEOF
-          echo "Release notes extracted."
 
-      # ── Build release zip (JAR + launchers + readme) ─────────────────────
-      - name: Package release zip
-        run: |
-          VERSION="${{ steps.version.outputs.value }}"
-          DIST="choir-manager-$VERSION"
-          mkdir "$DIST"
-          cp "target/$DIST.jar" "$DIST/"
-          cp run.sh run.bat README.md CHANGELOG.md "$DIST/"
-          # Placeholder for credentials — remind users to drop theirs in
-          echo "Place your Google OAuth credentials.json here." > "$DIST/credentials.json.PLACEHOLDER"
-          zip -r "$DIST.zip" "$DIST/"
-          echo "ZIP: $DIST.zip"
+      - name: List release assets
+        run: ls -lh dist/
 
-      # ── Create GitHub Release ─────────────────────────────────────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Choir Manager v${{ steps.version.outputs.value }}"
+          name: "Choir Manager v${{ needs.build-jar.outputs.version }}"
           body_path: release_notes.md
           draft: false
-          prerelease: ${{ contains(steps.version.outputs.value, '-') }}
+          prerelease: ${{ contains(needs.build-jar.outputs.version, '-') }}
           files: |
-            target/choir-manager-${{ steps.version.outputs.value }}.jar
-            choir-manager-${{ steps.version.outputs.value }}.zip
+            dist/choir-manager-${{ needs.build-jar.outputs.version }}-windows-setup.exe
+            dist/choir-manager-${{ needs.build-jar.outputs.version }}-macos.dmg
+            dist/choir-manager-${{ needs.build-jar.outputs.version }}.jar
+            dist/choir-manager-${{ needs.build-jar.outputs.version }}-source.zip
